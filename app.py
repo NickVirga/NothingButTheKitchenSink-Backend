@@ -1,14 +1,14 @@
 from chalice import Chalice, Response
 import bcrypt
 from bcrypt import checkpw
-import psycopg2
 from psycopg2 import pool
 from psycopg2.extras import RealDictCursor
 import jwt
 import os
 from dotenv import load_dotenv
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 import logging
+from functools import wraps
 
 load_dotenv()
 
@@ -16,9 +16,7 @@ logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
 ACCESS_TOKEN_EXPIRY = timedelta(minutes=15)
-# ACCESS_TOKEN_EXPIRY = timedelta(seconds=10)
 REFRESH_TOKEN_EXPIRY = timedelta(days=30)
-# REFRESH_TOKEN_EXPIRY = timedelta(seconds=20)
 
 app = Chalice(app_name='nothing-but-the-kitchen-sink-backend')
 
@@ -140,8 +138,8 @@ def user_login():
         access_token = jwt.encode(
             {
                 'user_id': user['id'],
-                'iat': datetime.now(timezone.utc),
-                'exp': datetime.now(timezone.utc) + ACCESS_TOKEN_EXPIRY
+                'iat': datetime.now(),
+                'exp': datetime.now() + ACCESS_TOKEN_EXPIRY
             },
             os.environ.get('JWT_ACCESS_SECRET_KEY'),
             algorithm='HS256'
@@ -151,8 +149,8 @@ def user_login():
             {
                 'user_id': user['id'],
                 'refresh_token_version': user['refresh_token_version'],
-                'iat': datetime.now(timezone.utc),
-                'exp': datetime.now(timezone.utc) + REFRESH_TOKEN_EXPIRY
+                'iat': datetime.now(),
+                'exp': datetime.now() + REFRESH_TOKEN_EXPIRY
             },
             os.environ.get('JWT_REFRESH_SECRET_KEY'),
             algorithm='HS256'
@@ -211,8 +209,8 @@ def refresh_token():
                 headers={"Content-Type": "application/json"}
             )
 
-        exp_time = datetime.fromtimestamp(exp, tz=timezone.utc)
-        if exp_time < datetime.now(timezone.utc):
+        exp_time = datetime.fromtimestamp(exp)
+        if exp_time < datetime.now():
             return Response(
                 body={"message": "Refresh token has expired."},
                 status_code=400,
@@ -237,8 +235,8 @@ def refresh_token():
         new_access_token = jwt.encode(
             {
                 'user_id': decoded_token['user_id'],
-                'iat': datetime.now(timezone.utc),
-                'exp': datetime.now(timezone.utc) + ACCESS_TOKEN_EXPIRY
+                'iat': datetime.now(),
+                'exp': datetime.now() + ACCESS_TOKEN_EXPIRY
             },
             os.environ.get('JWT_ACCESS_SECRET_KEY'),
             algorithm='HS256'
@@ -313,7 +311,7 @@ def user_logout():
                 "UPDATE users SET refresh_token_version = refresh_token_version + 1 WHERE id = %s",
                 (user_id,)
             )
-            
+
         try:
             conn.commit()
         except Exception as commit_error:
@@ -340,6 +338,168 @@ def user_logout():
         )
     except Exception as e:
         logger.error(f"Error logging out: {str(e)}")
+        return Response(
+            body={"message": "Internal server error."},
+            status_code=500,
+            headers={"Content-Type": "application/json"}
+        )
+    finally:
+        if conn:
+            db_pool.putconn(conn)
+
+
+def verify_token(f):
+    """Decorator to verify JWT token and attach user_id to request context."""
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        request = app.current_request
+        auth_header = request.headers.get("Authorization")
+
+        if not auth_header or not auth_header.startswith("Bearer "):
+            return Response(
+                body={"message": "Resource requires Bearer token authorization"},
+                status_code=401,
+                headers={"Content-Type": "application/json"}
+            )
+
+        splitBearerToken = auth_header.split(" ")
+
+        if len(splitBearerToken) != 2:
+            return Response(
+                body={"message": "Bearer token is malformed"},
+                status_code=400,
+                headers={"Content-Type": "application/json"}
+            )
+
+        bearerToken = splitBearerToken[1]
+
+        try:
+            decoded_token = jwt.decode(
+                bearerToken,
+                os.environ.get('JWT_ACCESS_SECRET_KEY'),
+                algorithms=['HS256']
+            )
+            print("decoded token", decoded_token.get("user_id"))
+            request.context['user_id'] = decoded_token.get("user_id")
+
+        except jwt.ExpiredSignatureError:
+            return Response(
+                body={"message": "Refresh token has expired."},
+                status_code=400,
+                headers={"Content-Type": "application/json"}
+            )
+        except jwt.InvalidTokenError:
+            return Response(
+                body={"message": "Invalid token."},
+                status_code=400,
+                headers={"Content-Type": "application/json"}
+            )
+
+        return f(*args, **kwargs)
+
+    return decorated_function
+
+
+@app.route('/api/tasks', methods=['POST'])
+@verify_token
+def create_task():
+
+    request = app.current_request
+    body = request.json_body
+    user_id = request.context.get('user_id')
+    description = body.get('description')
+    due_at = body.get('due_at')
+
+    if not due_at:
+        due_at = datetime.now()
+
+    if user_id is None or description is None:
+        return Response(
+            body={"message": "Required fields not completed."},
+            status_code=400,
+            headers={"Content-Type": "application/json"}
+        )
+
+    conn = None
+    try:
+        conn = db_pool.getconn()
+
+        with conn.cursor() as cursor:
+            cursor.execute(
+                "INSERT INTO tasks (user_id, description, due_at) VALUES (%s, %s, %s)",
+                (user_id, description, due_at)
+            )
+        conn.commit()
+
+        return Response(
+            body={"message": "Task created successfully."},
+            status_code=200,
+            headers={"Content-Type": "application/json"}
+        )
+    except Exception as e:
+        logger.error(f"Error creating task: {str(e)}")
+        return Response(
+            body={"message": "Internal server error."},
+            status_code=500,
+            headers={"Content-Type": "application/json"}
+        )
+    finally:
+        if conn:
+            db_pool.putconn(conn)
+
+
+@app.route('/api/tasks/{task_id}/flag', methods=['PATCH'])
+@verify_token
+def update_task(task_id):
+    request = app.current_request
+    body = request.json_body
+    user_id = request.context.get('user_id')
+    is_flagged = body.get('is_flagged')
+
+    if is_flagged is None:
+        return Response(
+            body={"message": "Flag status is required."},
+            status_code=400,
+            headers={"Content-Type": "application/json"}
+        )
+
+    conn = None
+    try:
+        conn = db_pool.getconn()
+        with conn.cursor() as cursor:
+            
+            cursor.execute("SELECT user_id FROM tasks WHERE id = %s", (task_id,))
+            result = cursor.fetchone()
+            
+            if not result:
+                return Response(
+                    body={"message": "Task not found."},
+                    status_code=404,
+                    headers={"Content-Type": "application/json"}
+                )
+            
+            task_owner_id = result[0] 
+
+            if task_owner_id != user_id:
+                return Response(
+                    body={"message": "Unauthorized. You can only update your own tasks."},
+                    status_code=403,
+                    headers={"Content-Type": "application/json"}
+                )
+
+            cursor.execute(
+                "UPDATE tasks SET is_flagged = %s WHERE id = %s",
+                (is_flagged, task_id)
+            )
+        conn.commit()
+
+        return Response(
+            body={"message": "Task flag status updated successfully."},
+            status_code=200,
+            headers={"Content-Type": "application/json"}
+        )
+    except Exception as e:
+        logger.error(f"Error updating task flag: {str(e)}")
         return Response(
             body={"message": "Internal server error."},
             status_code=500,
