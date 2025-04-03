@@ -7,11 +7,14 @@ from datetime import datetime, timedelta, timezone
 from db.connection import db_pool
 import logging
 from psycopg2.extras import RealDictCursor
+from utils.cors import cors_headers
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
-ACCESS_TOKEN_EXPIRY = timedelta(minutes=15)
+ACCESS_TOKEN_EXPIRY = timedelta(days=20)
+# ACCESS_TOKEN_EXPIRY = timedelta(minutes=15) # this one for production
+# ACCESS_TOKEN_EXPIRY = timedelta(seconds=10)
 REFRESH_TOKEN_EXPIRY = timedelta(days=30)
 
 
@@ -29,14 +32,14 @@ def register_routes(app):
             return Response(
                 body={"message": "Email, password, and secret key are required."},
                 status_code=400,
-                headers={"Content-Type": "application/json"}
+                headers=cors_headers()
             )
 
         if secret_key != os.environ.get("REGISTER_SECRET_KEY"):
             return Response(
                 body={"message": "Error registering user."},
                 status_code=401,
-                headers={"Content-Type": "application/json"}
+                headers=cors_headers()
             )
 
         conn = None
@@ -50,7 +53,7 @@ def register_routes(app):
                     return Response(
                         body={"message": "Email already registered."},
                         status_code=409,
-                        headers={"Content-Type": "application/json"}
+                        headers=cors_headers()
                     )
 
             hashed_password = bcrypt.hashpw(password.encode(
@@ -67,14 +70,14 @@ def register_routes(app):
             return Response(
                 body={"message": "User registered successfully."},
                 status_code=200,
-                headers={"Content-Type": "application/json"}
+                headers=cors_headers()
             )
         except Exception as e:
             logger.error(f"Error registering user: {str(e)}")
             return Response(
                 body={"message": "Internal server error."},
                 status_code=500,
-                headers={"Content-Type": "application/json"}
+                headers=cors_headers()
             )
         finally:
             if conn:
@@ -92,7 +95,7 @@ def register_routes(app):
             return Response(
                 body={"message": "Email and password required for login."},
                 status_code=400,
-                headers={"Content-Type": "application/json"}
+                headers=cors_headers()
             )
 
         conn = None
@@ -108,7 +111,7 @@ def register_routes(app):
                 return Response(
                     body={"message": "Invalid email or password."},
                     status_code=401,
-                    headers={"Content-Type": "application/json"}
+                    headers=cors_headers()
                 )
 
             hashed_password = user['password']
@@ -117,7 +120,7 @@ def register_routes(app):
                 return Response(
                     body={"message": "Invalid email or password."},
                     status_code=401,
-                    headers={"Content-Type": "application/json"}
+                    headers=cors_headers()
                 )
 
             access_token = jwt.encode(
@@ -148,7 +151,7 @@ def register_routes(app):
                           'refreshToken': refresh_token},
                       },
                 status_code=200,
-                headers={"Content-Type": "application/json"}
+                headers=cors_headers()
             )
 
         except Exception as e:
@@ -156,7 +159,7 @@ def register_routes(app):
             return Response(
                 body={"message": "Internal server error."},
                 status_code=500,
-                headers={"Content-Type": "application/json"}
+                headers=cors_headers()
             )
         finally:
             if conn:
@@ -170,10 +173,11 @@ def register_routes(app):
         refresh_token = body.get('refresh_token')
 
         if not refresh_token:
+            logger.error("Refresh token is required.")
             return Response(
                 body={"message": "Refresh token is required."},
                 status_code=400,
-                headers={"Content-Type": "application/json"}
+                headers=cors_headers()
             )
 
         conn = None
@@ -189,18 +193,21 @@ def register_routes(app):
             exp = decoded_token.get('exp')
 
             if user_id is None or refresh_token_version is None or exp is None:
+                logger.error("No user id, refresh token version, or expiration.")
                 return Response(
                     body={"message": "Invalid refresh token."},
                     status_code=400,
-                    headers={"Content-Type": "application/json"}
+                    headers=cors_headers()
                 )
+                
 
             exp_time = datetime.fromtimestamp(exp, tz=timezone.utc)
             if exp_time < datetime.now(timezone.utc):
+                logger.error("Refresh token has expired.")
                 return Response(
                     body={"message": "Refresh token has expired."},
                     status_code=400,
-                    headers={"Content-Type": "application/json"}
+                    headers=cors_headers()
                 )
 
             conn = db_pool.getconn()
@@ -212,10 +219,11 @@ def register_routes(app):
                 refresh_token_version = cursor.fetchone()
 
             if not refresh_token_version or not refresh_token_version[0] == decoded_token.get('refresh_token_version'):
+                logger.error("Invalid refresh token version.")
                 return Response(
                     body={"message": "Invalid refresh token."},
                     status_code=400,
-                    headers={"Content-Type": "application/json"}
+                    headers=cors_headers()
                 )
 
             new_access_token = jwt.encode(
@@ -233,27 +241,29 @@ def register_routes(app):
                       "access_token": new_access_token,
                       "refresh_token": refresh_token},
                 status_code=200,
-                headers={"Content-Type": "application/json"}
+                headers=cors_headers()
             )
 
         except jwt.ExpiredSignatureError:
+            logger.error("Refresh token has expired.")
             return Response(
                 body={"message": "Refresh token has expired."},
                 status_code=400,
-                headers={"Content-Type": "application/json"}
+                headers=cors_headers()
             )
         except jwt.InvalidTokenError:
+            logger.error("Invalid refresh token.")
             return Response(
                 body={"message": "Invalid refresh token."},
                 status_code=400,
-                headers={"Content-Type": "application/json"}
+                headers=cors_headers()
             )
         except Exception as e:
             logger.error(f"Error refreshing token: {str(e)}")
             return Response(
                 body={"message": "Internal server error."},
                 status_code=500,
-                headers={"Content-Type": "application/json"}
+                headers=cors_headers()
             )
         finally:
             if conn:
@@ -273,14 +283,14 @@ def register_routes(app):
                 body={
                     "message": "Email, password and secret key required."},
                 status_code=400,
-                headers={"Content-Type": "application/json"}
+                headers=cors_headers()
             )
 
         if secret_key != os.environ.get("REGISTER_SECRET_KEY"):
             return Response(
                 body={"message": "Invalid email or secret key."},
                 status_code=401,
-                headers={"Content-Type": "application/json"}
+                headers=cors_headers()
             )
 
         conn = None
@@ -297,7 +307,7 @@ def register_routes(app):
                 return Response(
                     body={"message": "Invalid email or secret key."},
                     status_code=401,
-                    headers={"Content-Type": "application/json"}
+                    headers=cors_headers()
                 )
 
             hashed_password = bcrypt.hashpw(password.encode(
@@ -317,7 +327,7 @@ def register_routes(app):
             return Response(
                 body={"message": "Password reset successful."},
                 status_code=200,
-                headers={"Content-Type": "application/json"}
+                headers=cors_headers()
             )
 
         except Exception as e:
@@ -325,7 +335,7 @@ def register_routes(app):
             return Response(
                 body={"message": "Internal server error."},
                 status_code=500,
-                headers={"Content-Type": "application/json"}
+                headers=cors_headers()
             )
         finally:
             if conn:
@@ -342,7 +352,7 @@ def register_routes(app):
             return Response(
                 body={"message": "Refresh token is required."},
                 status_code=400,
-                headers={"Content-Type": "application/json"}
+                headers=cors_headers()
             )
 
         conn = None
@@ -358,7 +368,7 @@ def register_routes(app):
                 return Response(
                     body={"message": "User identity unknown."},
                     status_code=401,
-                    headers={"Content-Type": "application/json"}
+                    headers=cors_headers()
                 )
 
             conn = db_pool.getconn()
@@ -379,7 +389,7 @@ def register_routes(app):
             return Response(
                 body={"message": "Logged out successfully."},
                 status_code=200,
-                headers={"Content-Type": "application/json"}
+                headers=cors_headers()
             )
 
         except jwt.ExpiredSignatureError:
@@ -387,21 +397,21 @@ def register_routes(app):
             return Response(
                 body={"message": "Refresh token has expired."},
                 status_code=400,
-                headers={"Content-Type": "application/json"}
+                headers=cors_headers()
             )
         except jwt.InvalidTokenError:
             logger.error("Invalid refresh token.")
             return Response(
                 body={"message": "Invalid refresh token."},
                 status_code=400,
-                headers={"Content-Type": "application/json"}
+                headers=cors_headers()
             )
         except Exception as e:
             logger.error(f"Error logging out: {str(e)}")
             return Response(
                 body={"message": "Internal server error."},
                 status_code=500,
-                headers={"Content-Type": "application/json"}
+                headers=cors_headers()
             )
         finally:
             if conn:
